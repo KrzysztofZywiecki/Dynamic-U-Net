@@ -20,6 +20,23 @@ class ConvCell(nn.Module):
     def forward(self, X):
         return self.conv_stack(X)
 
+class AdditionalLayers(nn.Module):
+    def __init__(self, in_channels, num_channels):
+        super(AdditionalLayers, self).__init__()
+        self.bottleneck = ConvCell(num_channels, num_channels*2)
+        self.downscale_layer = ConvCell(in_channels, num_channels)
+        self.downsample = nn.MaxPool2d(2)
+        self.upscale_layer = nn.ModuleDict({"upsample_conv":nn.ConvTranspose2d(num_channels*2, num_channels, 2, 2),
+            "conv_cell":ConvCell(num_channels*2, in_channels*2)})
+
+    def forward(self, X):
+        downscale_forward = self.downscale_layer(X)
+        bottleneck_forward = self.bottleneck(self.downsample(downscale_forward))
+        upsampled = self.upscale_layer["upsample_conv"](bottleneck_forward)
+        catenation = torch.cat((upsampled, downscale_forward), dim=1)
+
+        return self.upscale_layer["conv_cell"](catenation)
+
 class DynamicUNet(nn.Module):
     def __init__(self, in_channels, out_classes, features=[64, 128, 256]):
         super(DynamicUNet, self).__init__()
@@ -42,14 +59,14 @@ class DynamicUNet(nn.Module):
 
         self.classifier = nn.Conv2d(features[0], out_classes, 1)
 
-    def make_additional_step(self, num_features):
-        in_features = self.features[-1]
+    # def make_additional_step(self, num_features):
+    #     in_features = self.features[-1]
 
-        bottleneck = ConvCell(num_features, num_features*2)
-        downscale_layer = ConvCell(in_features, num_features)
-        upscale_layer = nn.ModuleDict({"upscale_conv":nn.ConvTranspose2d(num_features*2, num_features, 2, 2),
-            "conv_cell":ConvCell(num_features*2, in_features*2)})
-        return {"bottleneck":bottleneck, "downscale":downscale_layer, "upscale":upscale_layer}
+    #     bottleneck = ConvCell(num_features, num_features*2)
+    #     downscale_layer = ConvCell(in_features, num_features)
+    #     upscale_layer = nn.ModuleDict({"upscale_conv":nn.ConvTranspose2d(num_features*2, num_features, 2, 2),
+    #         "conv_cell":ConvCell(num_features*2, in_features*2)})
+    #     return {"bottleneck":bottleneck, "downscale":downscale_layer, "upscale":upscale_layer}
 
     def downscale_pass(self, X):
         scales = []
@@ -83,12 +100,14 @@ class DynamicUNet(nn.Module):
         if additional_step is None:
             X = self.upscale_pass(bottleneck_res, scales)
         else:
-            downscale_forward = additional_step["downscale"](X)
-            bottleneck_forward = additional_step["bottleneck"](self.downsample(downscale_forward))
-            upsampled = additional_step["upscale"]["upscale_conv"](bottleneck_forward)
-            catenation = torch.cat((upsampled, downscale_forward), dim=1)
+            augmented_res = additional_step(X)
 
-            augmented_res = additional_step["upscale"]["conv_cell"](catenation)
+            # downscale_forward = additional_step["downscale"](X)
+            # bottleneck_forward = additional_step["bottleneck"](self.downsample(downscale_forward))
+            # upsampled = additional_step["upscale"]["upscale_conv"](bottleneck_forward)
+            # catenation = torch.cat((upsampled, downscale_forward), dim=1)
+
+            # augmented_res = additional_step["upscale"]["conv_cell"](catenation)
 
             res = alpha*bottleneck_res + (1-alpha) * augmented_res
 
