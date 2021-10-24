@@ -26,6 +26,15 @@ def make_upscale_downscale_pair(downscale_in_features, downscale_out_features, u
                 "conv_cell":ConvCell(downscale_out_features*2, downscale_in_features)})
     return downscale, upscale
 
+def make_mapper_classifier(in_channels, out_classes, num_features):
+    mapper = nn.Sequential( 
+        nn.Conv2d(in_channels, num_features, 3, 1, 1, bias=False), 
+        nn.InstanceNorm2d(num_features), 
+        nn.LeakyReLU(0.1) 
+    )
+    classifier = nn.Conv2d(num_features, out_classes, 1)
+    return nn.ModuleDict({"mapper":mapper, "classifier":classifier})
+
 class BaseUNet(nn.Module):
     def __init__(self, features=[128, 256, 512]):
         assert(len(features) >= 2), "Features len should be at least 2"
@@ -72,60 +81,46 @@ class BaseUNet(nn.Module):
         return X
 
 class DynamicUNet(nn.Module):
-    def __init__(self, in_channels, out_classes, base_features):
+    def __init__(self, in_channels, out_classes, base_features, additional_features):
         super(DynamicUNet, self).__init__()
         
-        self.base_unet = BaseUNet(base_features)
         self.features = base_features
-        
         self.in_channels = in_channels
         self.out_channels = out_classes
-
+        
         self.downscale = nn.MaxPool2d(2)
-        self.base_mapper_classifier = self.make_mapper_classifier(in_channels, out_classes, base_features[0])
 
-    def make_mapper_classifier(self, in_channels, out_classes, num_features):
-        mapper = nn.Sequential( 
-            nn.Conv2d(in_channels, num_features, 3, 1, 1), 
-            nn.InstanceNorm2d(num_features), 
-            nn.LeakyReLU(0.1) 
-        )
-        classifier = nn.Conv2d(num_features, out_classes, 1)
-        # downscale, upscale = make_upscale_downscale_pair(num_features, self.features[0], self.features[0])
-        return nn.ModuleDict({"mapper":mapper, "classifier":classifier})
+        self.base_unet = BaseUNet(base_features)
+        self.base_mapper_classifier = nn.ModuleDict({"mapper":
+            nn.Sequential( 
+                nn.Conv2d(in_channels, base_features[0], 3, 1, 1, bias=False), 
+                nn.InstanceNorm2d(base_features[0]), 
+                nn.LeakyReLU(0.1) 
+            ), "classifier":nn.Conv2d(base_features[0], out_classes, 1)})
 
-    # def downscale_pass(self, X):
-    #     scales = []
-    #     for layer in self.downscale_layers:
-    #         X = layer(X)
-    #         scales.append(X)
-    #         X = self.downscale(X)
+        self.additional_mapper_classifiers = nn.ModuleList([])
+        self.additional_upscale = nn.ModuleList([])
+        self.additional_downscale = nn.ModuleList([])
 
-    #     return scales, X
+        input_size = in_channels
+        for feature in additional_features:
+            upscale, downscale = make_upscale_downscale_pair(input_size, feature, feature*2)
+            mappers = make_mapper_classifier(in_channels, out_classes, input_size)
 
-    # def upscale_pass(self, X, scales):
-    #     for matching_res, item in zip(reversed(scales), self.upscale_layers):
-    #         upscale = item["upsample_conv"]
-    #         cell = item["conv_cell"]
+            print(in_channels, out_classes, input_size, feature)
 
-    #         X = upscale(X)
-    #         X = torch.cat((matching_res, X), dim=1)
-    #         X = cell(X)
-    #     return X
+            self.additional_upscale.append(upscale)
+            self.additional_downscale.append(downscale)
+            self.additional_mapper_classifiers.append(mappers)
 
-    # def forward(self, X):
-    #     downscale_res, X = self.downscale_pass(X)
-    #     X = self.bottleneck(X)
-    #     X = self.upscale_pass(X, downscale_res)
-    #     return self.classifier(X)
+            input_size = feature
 
-    # def calculate_train_loss(self, X, y, loss_fn=nn.CrossEntropyLoss()):
-    #     scales, X = self.downscale_pass(X)
-    #     bottleneck_res = self.bottleneck(X)
-    #     X = self.upscale_pass(bottleneck_res, scales)
-    #     y_hat = self.classifier(X)
-    #     loss = loss_fn(y_hat, y)
-    #     return loss
+    def freeze_base_unet(self):
+        self.base_mapper_classifier.requires_grad_(False)
+        self.base_unet.requires_grad_(False)
+    def unfreeze_base_unet(self):
+        self.base_mapper_classifier.requires_grad_(True)
+        self.base_unet.requires_grad_(True)
 
     def forward(self, X):
         mapped = self.base_mapper_classifier["mapper"](X)
