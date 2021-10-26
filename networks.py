@@ -87,6 +87,7 @@ class DynamicUNet(nn.Module):
         self.features = base_features
         self.in_channels = in_channels
         self.out_channels = out_classes
+        self.level = 0
         
         self.downscale = nn.MaxPool2d(2)
 
@@ -104,7 +105,7 @@ class DynamicUNet(nn.Module):
 
         input_size = in_channels
         for feature in additional_features:
-            upscale, downscale = make_upscale_downscale_pair(input_size, feature, feature*2)
+            downscale, upscale = make_upscale_downscale_pair(input_size, feature, feature)
             mappers = make_mapper_classifier(in_channels, out_classes, input_size)
 
             print(in_channels, out_classes, input_size, feature)
@@ -122,7 +123,35 @@ class DynamicUNet(nn.Module):
         self.base_mapper_classifier.requires_grad_(True)
         self.base_unet.requires_grad_(True)
 
+    def use_layers(self, number):
+        if number > len(self.additional_downscale):
+            number = len(self.additional_downscale)
+        self.level = number
+
+    def use_higher_layer(self):
+        if self.level != len(self.additional_downscale):
+            self.level += 1
+
     def forward(self, X):
-        mapped = self.base_mapper_classifier["mapper"](X)
-        X = self.base_unet(mapped)
-        return self.base_mapper_classifier["classifier"](X)
+        if self.level != 0:
+            X = self.additional_mapper_classifiers[-self.level]["mapper"](X)
+        else:
+            X = self.base_mapper_classifier["mapper"](X)
+
+        results = []
+        for i in range(self.level, 0, -1):
+            X = self.additional_downscale[-i](X)
+            results.append(X)
+            X = self.downscale(X)
+
+        X = self.base_unet(X)
+
+        for i in range(self.level):
+            X = self.additional_upscale[-i - 1]["upsample_conv"](X)
+            X = torch.cat([X, results[-i - 1]], dim=1)
+            X = self.additional_upscale[-i - 1]["conv_cell"](X)
+
+        if self.level != 0:
+            return self.additional_mapper_classifiers[-self.level]["classifier"](X)
+        else:
+            return self.base_mapper_classifier["classifier"](X)
