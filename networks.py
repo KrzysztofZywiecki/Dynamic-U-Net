@@ -3,6 +3,8 @@ import torch.nn as nn
 from torch.nn.modules import padding
 from torch.nn.modules.container import Sequential
 import torch.functional as f
+from torchmetrics import IoU
+import numpy as np
 
 class ConvCell(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
@@ -193,7 +195,6 @@ class LearnableScaleDynamicUNet(nn.Module):
         input_size = base_features[0]
         for feature in additional_features:
             downscale, upscale = make_upscale_downscale_pair(feature[0], input_size, input_size)
-            mappers = make_mapper_classifier(in_channels, out_classes, feature[0])
             self.additional_scale.append(nn.Sequential(
                 nn.Conv2d(in_channels, feature[0], feature[1], feature[1]),
                 nn.InstanceNorm2d(feature[0]), 
@@ -261,7 +262,9 @@ class LearnableScaleDynamicUNet(nn.Module):
 
 def dice_score(y_pred, y_true, reduction = "mean"): # Calculates dice score for binary prediction (expects prediction to be two values per pixel)
     pred_label = y_pred[:, 1] > y_pred[:, 0]
-    scores = (2 * (pred_label * y_true).sum(axis=(1,2))) / (pred_label.sum(axis=(1,2)) + y_true.sum(axis=(1,2)))
+    iou = IoU(num_classes=2)
+    scores =  np.array([iou(pred_label[i], y_true[i]) for i in range(pred_label.size()[0])  ]) # iou(pred_label.long(), y_true)
+
 
     if reduction == "mean":
         return scores.mean()
