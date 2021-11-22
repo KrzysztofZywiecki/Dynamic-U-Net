@@ -3,8 +3,27 @@ import torch.nn as nn
 from torch.nn.modules import padding
 from torch.nn.modules.container import Sequential
 import torch.functional as f
+from torch.nn.modules.instancenorm import InstanceNorm2d
 from torchmetrics import IoU
 import numpy as np
+
+class ScaleAttentionBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, scale, side_length):
+        super(ScaleAttentionBlock, self).__init__()
+        self.conv_layer = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, scale, scale),
+            nn.InstanceNorm2d(out_channels)
+        )
+        self.multihead_attention_layer = nn.MultiheadAttention(out_channels, 4, batch_first=True)
+        self.unflatten = nn.Unflatten(2, (side_length//scale, side_length//scale))
+        self.norm = nn.InstanceNorm2d(out_channels)
+
+    def forward(self, X):
+        scaled_patch = self.conv_layer(X)
+        sequence_patch = torch.flatten(scaled_patch, 2).swapaxes(1, 2)
+        attenuated = self.multihead_attention_layer(sequence_patch, sequence_patch, sequence_patch, need_weights=False)[0]
+        result = self.unflatten(attenuated.swapaxes(1, 2))
+        return self.norm(result)
 
 class ConvCell(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
@@ -180,11 +199,13 @@ class LearnableScaleDynamicUNet(nn.Module):
         self.base_scale = base_scale
         self.base_unet = BaseUNet(base_features)
         self.base_mapper_classifier = nn.ModuleDict({"mapper":
-            nn.Sequential( 
-                nn.Conv2d(in_channels, base_features[0], base_scale, stride=base_scale, bias=False), 
-                nn.InstanceNorm2d(base_features[0]), 
-                nn.LeakyReLU(0.1) 
-            ), "classifier":nn.Conv2d(base_features[0], out_classes, 1)})
+        ScaleAttentionBlock(in_channels, base_features[0], base_scale, 128),
+            # nn.Sequential( 
+            #     nn.Conv2d(in_channels, base_features[0], base_scale, stride=base_scale, bias=False), 
+            #     nn.InstanceNorm2d(base_features[0]), 
+            #     nn.LeakyReLU(0.1) 
+            # ), 
+            "classifier":nn.Conv2d(base_features[0], out_classes, 1)})
 
         self.additional_upscale = nn.ModuleList([])
         self.additional_downscale = nn.ModuleList([])
@@ -199,7 +220,11 @@ class LearnableScaleDynamicUNet(nn.Module):
                 nn.Conv2d(in_channels, feature[0], feature[1], feature[1]),
                 nn.InstanceNorm2d(feature[0]), 
                 nn.LeakyReLU(0.1) 
-            ))
+            ) if feature[1] > 1 else nn.Sequential(
+                nn.Conv2d(in_channels, feature[0], 3, 1, 1),
+                nn.InstanceNorm2d(feature[0]), 
+                nn.LeakyReLU(0.1) 
+            )) 
             self.additional_classifiers.append(nn.Conv2d(feature[0], out_classes, 1))
 
             self.additional_upscale.append(upscale)
