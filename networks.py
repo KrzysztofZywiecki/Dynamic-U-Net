@@ -4,7 +4,6 @@ from torch.nn.modules import padding
 from torch.nn.modules.container import Sequential
 import torch.functional as f
 from torch.nn.modules.instancenorm import InstanceNorm2d
-from torchmetrics import IoU
 import numpy as np
 
 class ScaleAttentionBlock(nn.Module):
@@ -49,11 +48,23 @@ def make_upscale_downscale_pair(downscale_in_features, downscale_out_features, u
 
 def make_mapper_classifier(in_channels, out_classes, num_features):
     mapper = nn.Sequential( 
-        nn.Conv2d(in_channels, num_features, 3, 1, 1, bias=False), 
-        nn.InstanceNorm2d(num_features), 
+        nn.Conv2d(in_channels, num_features[0], 3, 1, 1, bias=False), 
+        nn.InstanceNorm2d(num_features[0]), 
         nn.LeakyReLU(0.1) 
     )
-    classifier = nn.Conv2d(num_features, out_classes, 1)
+    # scale = num_features[1]
+    # counter = 0
+    # while scale > 1:
+    #     counter += 1
+    #     scale //= 2
+    # classifier = nn.Sequential(
+    #     *[nn.Sequential(nn.Upsample(scale_factor=2),
+    #     nn.Conv2d(num_features[0], num_features[0], 3, 1, 1),
+    #     nn.LeakyReLU(0.1)) for i in range(counter)],
+    #     nn.Conv2d(num_features[0], out_classes, 1)
+    # )
+    
+    classifier = nn.Conv2d(num_features[0], out_classes, 1)
     return nn.ModuleDict({"mapper":mapper, "classifier":classifier})
 
 class BaseUNet(nn.Module):
@@ -102,13 +113,20 @@ class BaseUNet(nn.Module):
         return X
 
 class DynamicUNet(nn.Module):
-    def __init__(self, in_channels, out_classes, base_features, additional_features):
+    def __init__(self, in_channels, out_classes, base_features, base_scale, additional_features):
         super(DynamicUNet, self).__init__()
         
         self.features = base_features
         self.in_channels = in_channels
         self.out_channels = out_classes
+        self.base_scale = base_scale
         self.level = 0
+
+        # scale = base_scale
+        # counter = 0
+        # while scale > 1:
+        #     counter += 1
+        #     scale //= 2
         
         self.downscale = nn.MaxPool2d(2)
 
@@ -118,15 +136,23 @@ class DynamicUNet(nn.Module):
                 nn.Conv2d(in_channels, base_features[0], 3, 1, 1, bias=False), 
                 nn.InstanceNorm2d(base_features[0]), 
                 nn.LeakyReLU(0.1) 
-            ), "classifier":nn.Conv2d(base_features[0], out_classes, 1)})
+            ), "classifier":
+                nn.Conv2d(base_features[0], out_classes, 1)
+                # nn.Sequential(
+                #     *[nn.Sequential(nn.Upsample(scale_factor=2),
+                #     nn.Conv2d(base_features[0], base_features[0], 3, 1, 1),
+                #     nn.LeakyReLU(0.1)) for i in range(counter)],
+                #     nn.Conv2d(base_features[0], out_classes, 1)
+                # )
+            })
 
         self.additional_mapper_classifiers = nn.ModuleList([])
         self.additional_upscale = nn.ModuleList([])
         self.additional_downscale = nn.ModuleList([])
 
-        input_size = base_features[0]
+        input_size = (base_features[0], 8)
         for feature in additional_features:
-            downscale, upscale = make_upscale_downscale_pair(feature, input_size, input_size)
+            downscale, upscale = make_upscale_downscale_pair(feature[0], input_size[0], input_size[0])
             mappers = make_mapper_classifier(in_channels, out_classes, feature)
 
             self.additional_upscale.append(upscale)
@@ -198,14 +224,28 @@ class LearnableScaleDynamicUNet(nn.Module):
 
         self.base_scale = base_scale
         self.base_unet = BaseUNet(base_features)
+        scale = base_scale
+        counter = 0
+        while scale > 1:
+            counter += 1
+            scale //= 2
+
         self.base_mapper_classifier = nn.ModuleDict({"mapper":
-        ScaleAttentionBlock(in_channels, base_features[0], base_scale, 128),
-            # nn.Sequential( 
-            #     nn.Conv2d(in_channels, base_features[0], base_scale, stride=base_scale, bias=False), 
-            #     nn.InstanceNorm2d(base_features[0]), 
-            #     nn.LeakyReLU(0.1) 
-            # ), 
-            "classifier":nn.Conv2d(base_features[0], out_classes, 1)})
+        # ScaleAttentionBlock(in_channels, base_features[0], base_scale, 128),
+            nn.Sequential( 
+                nn.Conv2d(in_channels, base_features[0], base_scale, stride=base_scale, bias=False), 
+                nn.InstanceNorm2d(base_features[0]), 
+                nn.LeakyReLU(0.1) 
+            ), 
+            "classifier": 
+            nn.Sequential(
+                *[nn.Sequential(nn.Upsample(scale_factor=2),
+                nn.Conv2d(base_features[0], base_features[0], 3, 1, 1),
+                nn.LeakyReLU(0.1)) for i in range(counter)],
+                nn.Conv2d(base_features[0], out_classes, 1)
+            )
+            # nn.Conv2d(base_features[0], out_classes, 1)
+        })
 
         self.additional_upscale = nn.ModuleList([])
         self.additional_downscale = nn.ModuleList([])
@@ -225,7 +265,19 @@ class LearnableScaleDynamicUNet(nn.Module):
                 nn.InstanceNorm2d(feature[0]), 
                 nn.LeakyReLU(0.1) 
             )) 
-            self.additional_classifiers.append(nn.Conv2d(feature[0], out_classes, 1))
+            scale = feature[1]
+            counter = 0
+            while scale > 1:
+                counter += 1
+                scale //= 2
+            self.additional_classifiers.append(
+                nn.Sequential(
+                    *[nn.Sequential(nn.Upsample(scale_factor=2),
+                    nn.Conv2d(feature[0], feature[0], 3, 1, 1),
+                    nn.LeakyReLU(0.1)) for i in range(counter)],
+                    nn.Conv2d(feature[0], out_classes, 1)
+                )
+            )
 
             self.additional_upscale.append(upscale)
             self.additional_downscale.append(downscale)
@@ -284,16 +336,57 @@ class LearnableScaleDynamicUNet(nn.Module):
         else:
             return self.base_mapper_classifier["classifier"](X)
 
+class UNet(nn.Module):
+    def __init__(self, in_channels, out_classes, features):
+        super(UNet, self).__init__()
+        
+        self.in_channels = in_channels
+        self.out_channels = out_classes
 
-def dice_score(y_pred, y_true, reduction = "mean"): # Calculates dice score for binary prediction (expects prediction to be two values per pixel)
-    pred_label = y_pred[:, 1] > y_pred[:, 0]
-    iou = IoU(num_classes=2)
-    scores =  np.array([iou(pred_label[i], y_true[i]) for i in range(pred_label.size()[0])  ]) # iou(pred_label.long(), y_true)
+        self.downscale = nn.MaxPool2d(2)
 
+        self.additional_upscale = nn.ModuleList([])
+        self.additional_downscale = nn.ModuleList([])
+        self.bottleneck = ConvCell(features[-1], features[-1]*2)
 
-    if reduction == "mean":
-        return scores.mean()
-    if reduction == "sum":
-        return scores.sum()
-    else:
-        return scores
+        self.downscale_layers = nn.ModuleList([])
+        self.upscale_layers = nn.ModuleList([])
+
+        input_size = in_channels
+        for feature in features:
+            self.downscale_layers.append( ConvCell(input_size, feature) )
+            input_size = feature
+
+        self.upscale_layers = nn.ModuleList([nn.ModuleDict({  "upsample_conv":nn.ConvTranspose2d(features[-1]*2, features[-1], 2, 2), 
+                "conv_cell":ConvCell(features[-1]*2, features[-2])})])
+
+        features = [features[0]] + features
+        for index in range(len(features)-2, 0, -1):
+            self.upscale_layers.append(nn.ModuleDict({  "upsample_conv":nn.ConvTranspose2d(features[index], features[index], 2, 2), 
+                "conv_cell":ConvCell(features[index]*2, features[index-1])}))
+        self.classifier = nn.Conv2d(features[0], out_classes, 1)
+
+    def downscale_pass(self, X):
+        scales = []
+        for layer in self.downscale_layers:
+            X = layer(X)
+            scales.append(X)
+            X = self.downscale(X)
+
+        return scales, X
+
+    def upscale_pass(self, X, scales):
+        for matching_res, item in zip(reversed(scales), self.upscale_layers):
+            upscale = item["upsample_conv"]
+            cell = item["conv_cell"]
+
+            X = upscale(X)
+            X = torch.cat((matching_res, X), dim=1)
+            X = cell(X)
+        return X
+
+    def forward(self, X):
+        downscale_res, X = self.downscale_pass(X)
+        X = self.bottleneck(X)
+        X = self.upscale_pass(X, downscale_res)
+        return self.classifier(X)
